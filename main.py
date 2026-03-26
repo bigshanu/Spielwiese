@@ -1,273 +1,301 @@
-import tkinter as tk
-from tkinter import ttk, filedialog, messagebox
-import threading
+import sys
 import os
+import threading
+
+from PyQt6.QtWidgets import (
+    QApplication, QWidget, QVBoxLayout, QHBoxLayout,
+    QLabel, QLineEdit, QPushButton, QComboBox,
+    QProgressBar, QFileDialog, QMessageBox, QButtonGroup, QRadioButton,
+    QFrame,
+)
+from PyQt6.QtCore import Qt, pyqtSignal, QObject
+from PyQt6.QtGui import QFont, QColor, QPalette
 
 from downloader import (
-    download_video,
-    get_video_info,
-    get_default_download_path,
-    format_duration,
+    download_video, get_video_info, get_default_download_path, format_duration,
 )
 
-APP_TITLE = "YouTube Downloader"
-WINDOW_WIDTH = 620
-WINDOW_HEIGHT = 480
-BG_COLOR = "#1a1a2e"
-ACCENT_COLOR = "#e94560"
-CARD_COLOR = "#16213e"
-TEXT_COLOR = "#eaeaea"
-MUTED_COLOR = "#888"
-ENTRY_BG = "#0f3460"
+# ------------------------------------------------------------------ signals --
+
+class WorkerSignals(QObject):
+    progress = pyqtSignal(float, str)   # percent, label
+    info     = pyqtSignal(str)
+    done     = pyqtSignal()
+    error    = pyqtSignal(str)
 
 
-class App(tk.Tk):
+# --------------------------------------------------------------------- main --
+
+class MainWindow(QWidget):
     def __init__(self):
         super().__init__()
-        self.title(APP_TITLE)
-        self.geometry(f"{WINDOW_WIDTH}x{WINDOW_HEIGHT}")
-        self.resizable(False, False)
-        self.configure(bg=BG_COLOR)
-
-        self._download_path = get_default_download_path()
+        self.setWindowTitle("YouTube Downloader")
+        self.setFixedSize(640, 520)
         self._is_downloading = False
-
+        self._signals = WorkerSignals()
+        self._signals.progress.connect(self._on_progress)
+        self._signals.info.connect(self._on_info)
+        self._signals.done.connect(self._on_done)
+        self._signals.error.connect(self._on_error)
         self._build_ui()
+        self._apply_style()
 
-    # ------------------------------------------------------------------ UI --
+    # ------------------------------------------------------------------- UI --
 
     def _build_ui(self):
+        root = QVBoxLayout(self)
+        root.setContentsMargins(30, 28, 30, 24)
+        root.setSpacing(0)
+
         # Title
-        tk.Label(
-            self,
-            text="YouTube Downloader",
-            font=("SF Pro Display", 22, "bold"),
-            bg=BG_COLOR,
-            fg=ACCENT_COLOR,
-        ).pack(pady=(28, 4))
+        title = QLabel("YouTube Downloader")
+        title.setFont(QFont("SF Pro Display", 22, QFont.Weight.Bold))
+        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        title.setObjectName("title")
+        root.addWidget(title)
 
-        tk.Label(
-            self,
-            text="Videos & Musik bequem herunterladen",
-            font=("SF Pro Display", 11),
-            bg=BG_COLOR,
-            fg=MUTED_COLOR,
-        ).pack(pady=(0, 18))
+        subtitle = QLabel("Videos & Musik bequem herunterladen")
+        subtitle.setFont(QFont("SF Pro Display", 11))
+        subtitle.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        subtitle.setObjectName("subtitle")
+        root.addWidget(subtitle)
+        root.addSpacing(20)
 
-        # Card frame
-        card = tk.Frame(self, bg=CARD_COLOR, bd=0)
-        card.pack(padx=30, fill="x")
+        # Card
+        card = QFrame()
+        card.setObjectName("card")
+        card_layout = QVBoxLayout(card)
+        card_layout.setContentsMargins(20, 14, 20, 18)
+        card_layout.setSpacing(6)
 
-        # URL input
-        self._add_label(card, "YouTube-URL")
-        url_row = tk.Frame(card, bg=CARD_COLOR)
-        url_row.pack(fill="x", padx=16, pady=(0, 12))
+        # URL row
+        card_layout.addWidget(self._label("YouTube-URL"))
+        url_row = QHBoxLayout()
+        self._url_edit = QLineEdit()
+        self._url_edit.setPlaceholderText("https://www.youtube.com/watch?v=...")
+        self._url_edit.setObjectName("input")
+        self._url_edit.returnPressed.connect(self._fetch_info)
+        url_row.addWidget(self._url_edit)
+        info_btn = QPushButton("Info")
+        info_btn.setObjectName("secondaryBtn")
+        info_btn.setFixedWidth(64)
+        info_btn.clicked.connect(self._fetch_info)
+        url_row.addWidget(info_btn)
+        card_layout.addLayout(url_row)
 
-        self._url_var = tk.StringVar()
-        url_entry = tk.Entry(
-            url_row,
-            textvariable=self._url_var,
-            font=("SF Pro Display", 12),
-            bg=ENTRY_BG,
-            fg=TEXT_COLOR,
-            insertbackground=TEXT_COLOR,
-            relief="flat",
-            bd=6,
-        )
-        url_entry.pack(side="left", fill="x", expand=True)
-        url_entry.bind("<Return>", lambda _: self._fetch_info())
+        self._info_label = QLabel("")
+        self._info_label.setObjectName("infoText")
+        self._info_label.setWordWrap(True)
+        card_layout.addWidget(self._info_label)
+        card_layout.addSpacing(6)
 
-        tk.Button(
-            url_row,
-            text="Info",
-            font=("SF Pro Display", 11),
-            bg=ACCENT_COLOR,
-            fg="white",
-            relief="flat",
-            padx=10,
-            cursor="hand2",
-            command=self._fetch_info,
-        ).pack(side="left", padx=(6, 0))
+        # Format + Quality
+        card_layout.addWidget(self._label("Format & Qualität"))
+        fmt_row = QHBoxLayout()
+        self._fmt_group = QButtonGroup(self)
+        for i, fmt in enumerate(("MP4", "MP3")):
+            rb = QRadioButton(fmt)
+            rb.setObjectName("radio")
+            if i == 0:
+                rb.setChecked(True)
+            self._fmt_group.addButton(rb, i)
+            fmt_row.addWidget(rb)
+        self._fmt_group.idToggled.connect(self._on_format_change)
 
-        # Info label
-        self._info_var = tk.StringVar(value="")
-        tk.Label(
-            card,
-            textvariable=self._info_var,
-            font=("SF Pro Display", 10),
-            bg=CARD_COLOR,
-            fg=MUTED_COLOR,
-            anchor="w",
-        ).pack(fill="x", padx=16, pady=(0, 10))
+        self._quality_combo = QComboBox()
+        self._quality_combo.addItems(["best", "1080p", "720p", "480p"])
+        self._quality_combo.setObjectName("combo")
+        self._quality_combo.setFixedWidth(100)
+        fmt_row.addWidget(self._quality_combo)
+        fmt_row.addStretch()
+        card_layout.addLayout(fmt_row)
+        card_layout.addSpacing(6)
 
-        # Format + Quality row
-        opts_row = tk.Frame(card, bg=CARD_COLOR)
-        opts_row.pack(fill="x", padx=16, pady=(0, 12))
+        # Path
+        card_layout.addWidget(self._label("Speicherort"))
+        path_row = QHBoxLayout()
+        self._path_edit = QLineEdit(get_default_download_path())
+        self._path_edit.setObjectName("input")
+        path_row.addWidget(self._path_edit)
+        browse_btn = QPushButton("...")
+        browse_btn.setObjectName("secondaryBtn")
+        browse_btn.setFixedWidth(40)
+        browse_btn.clicked.connect(self._choose_path)
+        path_row.addWidget(browse_btn)
+        card_layout.addLayout(path_row)
 
-        self._add_label(card, "Format & Qualität", padx=16)
-        fmt_row = tk.Frame(card, bg=CARD_COLOR)
-        fmt_row.pack(fill="x", padx=16, pady=(0, 14))
-
-        self._format_var = tk.StringVar(value="mp4")
-        for fmt in ("mp4", "mp3"):
-            tk.Radiobutton(
-                fmt_row,
-                text=fmt.upper(),
-                variable=self._format_var,
-                value=fmt,
-                font=("SF Pro Display", 11),
-                bg=CARD_COLOR,
-                fg=TEXT_COLOR,
-                selectcolor=ENTRY_BG,
-                activebackground=CARD_COLOR,
-                command=self._on_format_change,
-            ).pack(side="left", padx=(0, 14))
-
-        self._quality_var = tk.StringVar(value="best")
-        self._quality_combo = ttk.Combobox(
-            fmt_row,
-            textvariable=self._quality_var,
-            values=["best", "1080p", "720p", "480p"],
-            state="readonly",
-            width=10,
-            font=("SF Pro Display", 11),
-        )
-        self._quality_combo.pack(side="left")
-
-        # Download path
-        self._add_label(card, "Speicherort", padx=16)
-        path_row = tk.Frame(card, bg=CARD_COLOR)
-        path_row.pack(fill="x", padx=16, pady=(0, 16))
-
-        self._path_var = tk.StringVar(value=self._download_path)
-        tk.Entry(
-            path_row,
-            textvariable=self._path_var,
-            font=("SF Pro Display", 11),
-            bg=ENTRY_BG,
-            fg=TEXT_COLOR,
-            insertbackground=TEXT_COLOR,
-            relief="flat",
-            bd=6,
-        ).pack(side="left", fill="x", expand=True)
-
-        tk.Button(
-            path_row,
-            text="...",
-            font=("SF Pro Display", 11),
-            bg=ENTRY_BG,
-            fg=TEXT_COLOR,
-            relief="flat",
-            padx=8,
-            cursor="hand2",
-            command=self._choose_path,
-        ).pack(side="left", padx=(6, 0))
+        root.addWidget(card)
+        root.addSpacing(16)
 
         # Progress
-        self._progress_var = tk.DoubleVar()
-        self._progress_label = tk.StringVar(value="")
-        tk.Label(
-            self,
-            textvariable=self._progress_label,
-            font=("SF Pro Display", 10),
-            bg=BG_COLOR,
-            fg=MUTED_COLOR,
-        ).pack(pady=(14, 2))
+        self._progress_label = QLabel("")
+        self._progress_label.setObjectName("subtitle")
+        self._progress_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        root.addWidget(self._progress_label)
+        root.addSpacing(4)
 
-        self._progress_bar = ttk.Progressbar(
-            self, variable=self._progress_var, maximum=100, length=WINDOW_WIDTH - 60
-        )
-        self._progress_bar.pack(pady=(0, 10))
+        self._progress_bar = QProgressBar()
+        self._progress_bar.setRange(0, 100)
+        self._progress_bar.setValue(0)
+        self._progress_bar.setObjectName("progress")
+        self._progress_bar.setTextVisible(False)
+        self._progress_bar.setFixedHeight(8)
+        root.addWidget(self._progress_bar)
+        root.addSpacing(14)
 
-        # Download button
-        self._dl_btn = tk.Button(
-            self,
-            text="Download starten",
-            font=("SF Pro Display", 13, "bold"),
-            bg=ACCENT_COLOR,
-            fg="white",
-            relief="flat",
-            padx=20,
-            pady=10,
-            cursor="hand2",
-            command=self._start_download,
-        )
-        self._dl_btn.pack(pady=(4, 0))
+        # Buttons
+        btn_row = QHBoxLayout()
+        btn_row.setSpacing(10)
 
-        # Open folder
-        tk.Button(
-            self,
-            text="Ordner öffnen",
-            font=("SF Pro Display", 11),
-            bg=BG_COLOR,
-            fg=MUTED_COLOR,
-            relief="flat",
-            cursor="hand2",
-            command=self._open_folder,
-        ).pack(pady=(6, 0))
+        self._dl_btn = QPushButton("Download starten")
+        self._dl_btn.setObjectName("primaryBtn")
+        self._dl_btn.clicked.connect(self._start_download)
+        btn_row.addWidget(self._dl_btn)
 
-    # --------------------------------------------------------------- helpers -
+        open_btn = QPushButton("Ordner öffnen")
+        open_btn.setObjectName("secondaryBtn")
+        open_btn.clicked.connect(self._open_folder)
+        btn_row.addWidget(open_btn)
 
-    def _add_label(self, parent, text, padx=16):
-        tk.Label(
-            parent,
-            text=text,
-            font=("SF Pro Display", 10, "bold"),
-            bg=CARD_COLOR,
-            fg=MUTED_COLOR,
-            anchor="w",
-        ).pack(fill="x", padx=padx, pady=(10, 2))
+        root.addLayout(btn_row)
 
-    def _on_format_change(self):
-        if self._format_var.get() == "mp3":
-            self._quality_combo.config(state="disabled")
-        else:
-            self._quality_combo.config(state="readonly")
+    def _label(self, text: str) -> QLabel:
+        lbl = QLabel(text)
+        lbl.setObjectName("fieldLabel")
+        lbl.setFont(QFont("SF Pro Display", 10, QFont.Weight.Bold))
+        return lbl
+
+    def _apply_style(self):
+        self.setStyleSheet("""
+            QWidget {
+                background-color: #1a1a2e;
+                color: #eaeaea;
+                font-family: 'SF Pro Display', 'Helvetica Neue', Arial, sans-serif;
+            }
+            QLabel#title { color: #e94560; }
+            QLabel#subtitle, QLabel#infoText, QLabel#fieldLabel { color: #888888; }
+            QFrame#card {
+                background-color: #16213e;
+                border-radius: 10px;
+            }
+            QLineEdit#input {
+                background-color: #0f3460;
+                border: none;
+                border-radius: 6px;
+                padding: 8px 10px;
+                color: #eaeaea;
+                font-size: 12px;
+            }
+            QLineEdit#input:focus { border: 1px solid #e94560; }
+            QComboBox#combo {
+                background-color: #0f3460;
+                border: none;
+                border-radius: 6px;
+                padding: 6px 10px;
+                color: #eaeaea;
+            }
+            QComboBox#combo::drop-down { border: none; }
+            QComboBox#combo QAbstractItemView {
+                background-color: #0f3460;
+                color: #eaeaea;
+                selection-background-color: #e94560;
+            }
+            QRadioButton#radio { color: #eaeaea; spacing: 6px; }
+            QRadioButton#radio::indicator {
+                width: 14px; height: 14px;
+                border-radius: 7px;
+                border: 2px solid #888;
+                background: transparent;
+            }
+            QRadioButton#radio::indicator:checked {
+                background-color: #e94560;
+                border-color: #e94560;
+            }
+            QPushButton#primaryBtn {
+                background-color: #e94560;
+                color: white;
+                border: none;
+                border-radius: 8px;
+                padding: 11px 24px;
+                font-size: 13px;
+                font-weight: bold;
+            }
+            QPushButton#primaryBtn:hover { background-color: #c73652; }
+            QPushButton#primaryBtn:disabled { background-color: #555; color: #888; }
+            QPushButton#secondaryBtn {
+                background-color: #0f3460;
+                color: #eaeaea;
+                border: none;
+                border-radius: 6px;
+                padding: 8px 12px;
+                font-size: 11px;
+            }
+            QPushButton#secondaryBtn:hover { background-color: #1a4a80; }
+            QProgressBar#progress {
+                background-color: #0f3460;
+                border-radius: 4px;
+                border: none;
+            }
+            QProgressBar#progress::chunk {
+                background-color: #e94560;
+                border-radius: 4px;
+            }
+        """)
+
+    # ------------------------------------------------------------ handlers --
+
+    def _on_format_change(self, btn_id: int, checked: bool):
+        if checked:
+            self._quality_combo.setEnabled(btn_id == 0)
 
     def _choose_path(self):
-        path = filedialog.askdirectory(initialdir=self._path_var.get())
+        path = QFileDialog.getExistingDirectory(self, "Speicherort wählen", self._path_edit.text())
         if path:
-            self._path_var.set(path)
+            self._path_edit.setText(path)
 
     def _open_folder(self):
-        path = self._path_var.get()
+        path = self._path_edit.text()
         if os.path.exists(path):
             os.system(f'open "{path}"')
         else:
-            messagebox.showinfo("Info", f"Ordner existiert noch nicht:\n{path}")
+            QMessageBox.information(self, "Info", f"Ordner existiert noch nicht:\n{path}")
 
     def _fetch_info(self):
-        url = self._url_var.get().strip()
+        url = self._url_edit.text().strip()
         if not url:
             return
-        self._info_var.set("Lade Info...")
+        self._info_label.setText("Lade Info…")
 
         def fetch():
             try:
                 info = get_video_info(url)
-                duration_str = format_duration(info["duration"])
-                self._info_var.set(
-                    f"{info['title']}  •  {duration_str}  •  {info['uploader']}"
+                dur = format_duration(info["duration"])
+                self._signals.info.emit(
+                    f"{info['title']}  •  {dur}  •  {info['uploader']}"
                 )
             except Exception as e:
-                self._info_var.set(f"Fehler: {e}")
+                self._signals.info.emit(f"Fehler: {e}")
 
         threading.Thread(target=fetch, daemon=True).start()
 
-    # ------------------------------------------------------------ download ---
+    # ---------------------------------------------------------- download ---
 
     def _start_download(self):
         if self._is_downloading:
             return
-
-        url = self._url_var.get().strip()
+        url = self._url_edit.text().strip()
         if not url:
-            messagebox.showwarning("Fehlende URL", "Bitte eine YouTube-URL eingeben.")
+            QMessageBox.warning(self, "Fehlende URL", "Bitte eine YouTube-URL eingeben.")
             return
 
         self._is_downloading = True
-        self._dl_btn.config(state="disabled", text="Lädt herunter…")
-        self._progress_var.set(0)
+        self._dl_btn.setEnabled(False)
+        self._dl_btn.setText("Lädt herunter…")
+        self._progress_bar.setValue(0)
+
+        fmt = "mp3" if self._fmt_group.checkedId() == 1 else "mp4"
+        quality = self._quality_combo.currentText()
+        path = self._path_edit.text()
 
         def hook(d):
             if d["status"] == "downloading":
@@ -275,36 +303,49 @@ class App(tk.Tk):
                 downloaded = d.get("downloaded_bytes", 0)
                 speed = d.get("_speed_str", "")
                 eta = d.get("_eta_str", "")
-                if total:
-                    pct = downloaded / total * 100
-                    self._progress_var.set(pct)
+                pct = (downloaded / total * 100) if total else 0
                 label = f"{speed}  –  ETA {eta}" if speed else ""
-                self._progress_label.set(label)
+                self._signals.progress.emit(pct, label)
             elif d["status"] == "finished":
-                self._progress_var.set(100)
-                self._progress_label.set("Verarbeite…")
+                self._signals.progress.emit(100, "Verarbeite…")
 
         def run():
             try:
-                download_video(
-                    url=url,
-                    download_path=self._path_var.get(),
-                    format_choice=self._format_var.get(),
-                    quality=self._quality_var.get(),
-                    progress_hook=hook,
-                )
-                self._progress_label.set("Fertig!")
-                messagebox.showinfo("Fertig", "Download abgeschlossen!")
+                download_video(url=url, download_path=path, format_choice=fmt,
+                               quality=quality, progress_hook=hook)
+                self._signals.done.emit()
             except Exception as e:
-                self._progress_label.set("")
-                messagebox.showerror("Fehler", str(e))
-            finally:
-                self._is_downloading = False
-                self._dl_btn.config(state="normal", text="Download starten")
+                self._signals.error.emit(str(e))
 
         threading.Thread(target=run, daemon=True).start()
 
+    def _on_progress(self, pct: float, label: str):
+        self._progress_bar.setValue(int(pct))
+        self._progress_label.setText(label)
+
+    def _on_info(self, text: str):
+        self._info_label.setText(text)
+
+    def _on_done(self):
+        self._progress_label.setText("Fertig!")
+        self._is_downloading = False
+        self._dl_btn.setEnabled(True)
+        self._dl_btn.setText("Download starten")
+        QMessageBox.information(self, "Fertig", "Download abgeschlossen!")
+
+    def _on_error(self, msg: str):
+        self._progress_label.setText("")
+        self._is_downloading = False
+        self._dl_btn.setEnabled(True)
+        self._dl_btn.setText("Download starten")
+        QMessageBox.critical(self, "Fehler", msg)
+
+
+# ----------------------------------------------------------------- entrypoint
 
 if __name__ == "__main__":
-    app = App()
-    app.mainloop()
+    app = QApplication(sys.argv)
+    app.setStyle("Fusion")
+    window = MainWindow()
+    window.show()
+    sys.exit(app.exec())
