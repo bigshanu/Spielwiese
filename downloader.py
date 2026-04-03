@@ -54,11 +54,23 @@ def build_ydl_opts(
             }
         )
     else:
+        # vcodec^=avc = H.264, acodec^=mp4a = AAC — beides QuickTime-kompatibel.
+        # Fallback auf beliebiges mp4, falls kein H.264-Stream verfügbar.
+        h264 = "vcodec^=avc"
+        aac  = "acodec^=mp4a"
         quality_map = {
-            "best": "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best",
-            "1080p": "bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/best[height<=1080]",
-            "720p": "bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/best[height<=720]",
-            "480p": "bestvideo[height<=480][ext=mp4]+bestaudio[ext=m4a]/best[height<=480]",
+            "best":  (f"bestvideo[{h264}][ext=mp4]+bestaudio[{aac}][ext=m4a]"
+                      f"/bestvideo[{h264}]+bestaudio[{aac}]"
+                      f"/bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best"),
+            "1080p": (f"bestvideo[{h264}][height<=1080][ext=mp4]+bestaudio[{aac}][ext=m4a]"
+                      f"/bestvideo[{h264}][height<=1080]+bestaudio[{aac}]"
+                      f"/bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/best[height<=1080]"),
+            "720p":  (f"bestvideo[{h264}][height<=720][ext=mp4]+bestaudio[{aac}][ext=m4a]"
+                      f"/bestvideo[{h264}][height<=720]+bestaudio[{aac}]"
+                      f"/bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/best[height<=720]"),
+            "480p":  (f"bestvideo[{h264}][height<=480][ext=mp4]+bestaudio[{aac}][ext=m4a]"
+                      f"/bestvideo[{h264}][height<=480]+bestaudio[{aac}]"
+                      f"/bestvideo[height<=480][ext=mp4]+bestaudio[ext=m4a]/best[height<=480]"),
         }
         opts["format"] = quality_map.get(quality, quality_map["best"])
         opts["merge_output_format"] = "mp4"
