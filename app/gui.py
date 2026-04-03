@@ -11,15 +11,38 @@ from PySide6.QtGui import QFont
 from downloader import get_default_download_path
 from app.worker import InfoWorker, DownloadWorker
 
+# ── Platform config ────────────────────────────────────────────────────────
+PLATFORMS = [
+    {"id": "youtube",   "label": "YouTube",   "has_quality": True,  "placeholder": "https://www.youtube.com/watch?v=..."},
+    {"id": "tiktok",    "label": "TikTok",    "has_quality": False, "placeholder": "https://www.tiktok.com/@user/video/..."},
+    {"id": "instagram", "label": "Instagram", "has_quality": False, "placeholder": "https://www.instagram.com/reel/..."},
+]
+
 STYLESHEET = """
 QWidget {
     background-color: #1a1a2e;
     color: #eaeaea;
     font-family: 'SF Pro Display', 'Helvetica Neue', Arial, sans-serif;
 }
-QLabel#title   { color: #e94560; }
-QLabel#muted   { color: #888888; }
-QFrame#card    { background-color: #16213e; border-radius: 10px; }
+QLabel#title { color: #e94560; }
+QLabel#muted { color: #888888; }
+QFrame#card  { background-color: #16213e; border-radius: 10px; }
+
+/* Platform tab buttons */
+QPushButton#tab {
+    background-color: #0f3460;
+    color: #888;
+    border: none;
+    border-radius: 8px;
+    padding: 8px 0;
+    font-size: 13px;
+    font-weight: bold;
+}
+QPushButton#tab[active=true] {
+    background-color: #e94560;
+    color: white;
+}
+QPushButton#tab:hover { color: #eaeaea; }
 
 QLineEdit#input {
     background-color: #0f3460;
@@ -94,14 +117,16 @@ QProgressBar::chunk {
 class MainWindow(QWidget):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("YouTube Downloader")
-        self.setFixedSize(640, 500)
+        self.setWindowTitle("Downloader")
+        self.setFixedSize(640, 530)
 
+        self._platform_idx = 0  # active platform index
         self._info_worker: InfoWorker | None = None
         self._dl_worker: DownloadWorker | None = None
 
         self._build_ui()
         self.setStyleSheet(STYLESHEET)
+        self._switch_platform(0)
 
     # ------------------------------------------------------------------- UI --
 
@@ -110,20 +135,33 @@ class MainWindow(QWidget):
         root.setContentsMargins(30, 28, 30, 24)
         root.setSpacing(0)
 
-        # Header
-        title = QLabel("YouTube Downloader")
+        # Title
+        title = QLabel("Downloader")
         title.setObjectName("title")
         title.setFont(QFont("SF Pro Display", 22, QFont.Weight.Bold))
         title.setAlignment(Qt.AlignmentFlag.AlignCenter)
         root.addWidget(title)
 
-        subtitle = QLabel("Videos & Musik bequem herunterladen")
+        subtitle = QLabel("YouTube  •  TikTok  •  Instagram")
         subtitle.setObjectName("muted")
         subtitle.setAlignment(Qt.AlignmentFlag.AlignCenter)
         root.addWidget(subtitle)
-        root.addSpacing(20)
+        root.addSpacing(18)
 
-        # Card
+        # ── Platform tabs ──────────────────────────────────────────────────
+        tab_row = QHBoxLayout()
+        tab_row.setSpacing(8)
+        self._tab_btns = []
+        for i, p in enumerate(PLATFORMS):
+            btn = QPushButton(p["label"])
+            btn.setObjectName("tab")
+            btn.clicked.connect(lambda _, idx=i: self._switch_platform(idx))
+            tab_row.addWidget(btn)
+            self._tab_btns.append(btn)
+        root.addLayout(tab_row)
+        root.addSpacing(14)
+
+        # ── Card ───────────────────────────────────────────────────────────
         card = QFrame()
         card.setObjectName("card")
         cl = QVBoxLayout(card)
@@ -131,11 +169,10 @@ class MainWindow(QWidget):
         cl.setSpacing(6)
 
         # URL
-        cl.addWidget(self._field_label("YouTube-URL"))
+        cl.addWidget(self._field_label("URL"))
         url_row = QHBoxLayout()
         self._url_edit = QLineEdit()
         self._url_edit.setObjectName("input")
-        self._url_edit.setPlaceholderText("https://www.youtube.com/watch?v=...")
         self._url_edit.returnPressed.connect(self._fetch_info)
         url_row.addWidget(self._url_edit)
         info_btn = QPushButton("Info")
@@ -188,7 +225,7 @@ class MainWindow(QWidget):
         root.addWidget(card)
         root.addSpacing(16)
 
-        # Fortschritt
+        # Progress
         self._status_label = QLabel("")
         self._status_label.setObjectName("muted")
         self._status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -223,11 +260,38 @@ class MainWindow(QWidget):
         lbl.setFont(QFont("SF Pro Display", 10, QFont.Weight.Bold))
         return lbl
 
-    # ------------------------------------------------------------ handlers --
+    # ─────────────────────────────────────────────────── platform switching --
+
+    def _switch_platform(self, idx: int):
+        self._platform_idx = idx
+        platform = PLATFORMS[idx]
+
+        # Update tab button styles
+        for i, btn in enumerate(self._tab_btns):
+            btn.setProperty("active", i == idx)
+            btn.style().unpolish(btn)
+            btn.style().polish(btn)
+
+        # Update placeholder and clear fields
+        self._url_edit.setPlaceholderText(platform["placeholder"])
+        self._url_edit.clear()
+        self._info_label.clear()
+        self._status_label.clear()
+        self._progress.setValue(0)
+
+        # Quality only makes sense for YouTube
+        self._quality_combo.setVisible(platform["has_quality"])
+
+        # Update download path subfolder
+        base = str(__import__("pathlib").Path.home() / "Downloads")
+        self._path_edit.setText(f"{base}/{platform['label']}")
+
+    # ─────────────────────────────────────────────────────────── handlers --
 
     def _on_format_change(self, btn_id: int, checked: bool):
         if checked:
-            self._quality_combo.setEnabled(btn_id == 0)
+            has_quality = PLATFORMS[self._platform_idx]["has_quality"]
+            self._quality_combo.setEnabled(btn_id == 0 and has_quality)
 
     def _choose_path(self):
         path = QFileDialog.getExistingDirectory(self, "Speicherort wählen", self._path_edit.text())
@@ -246,27 +310,30 @@ class MainWindow(QWidget):
         if not url:
             return
         self._info_label.setText("Lade Info…")
-
         self._info_worker = InfoWorker(url)
         self._info_worker.result.connect(self._info_label.setText)
         self._info_worker.start()
 
-    # ---------------------------------------------------------- download ---
+    # ──────────────────────────────────────────────────────── download ──
 
     def _start_download(self):
         if self._dl_worker and self._dl_worker.isRunning():
             return
         url = self._url_edit.text().strip()
         if not url:
-            QMessageBox.warning(self, "Fehlende URL", "Bitte eine YouTube-URL eingeben.")
+            QMessageBox.warning(self, "Fehlende URL", "Bitte eine URL eingeben.")
             return
 
+        platform = PLATFORMS[self._platform_idx]["id"]
         fmt = "mp3" if self._fmt_group.checkedId() == 1 else "mp4"
+        quality = self._quality_combo.currentText() if PLATFORMS[self._platform_idx]["has_quality"] else "best"
+
         self._dl_worker = DownloadWorker(
             url=url,
             path=self._path_edit.text(),
+            platform=platform,
             fmt=fmt,
-            quality=self._quality_combo.currentText(),
+            quality=quality,
         )
         self._dl_worker.progress.connect(self._on_progress)
         self._dl_worker.done.connect(self._on_done)
@@ -285,7 +352,8 @@ class MainWindow(QWidget):
         self._status_label.setText("Fertig!")
         self._dl_btn.setEnabled(True)
         self._dl_btn.setText("Download starten")
-        QMessageBox.information(self, "Fertig", "Download abgeschlossen!")
+        platform = PLATFORMS[self._platform_idx]["label"]
+        QMessageBox.information(self, "Fertig", f"{platform}-Download abgeschlossen!")
 
     def _on_error(self, msg: str):
         self._status_label.setText("")

@@ -24,14 +24,15 @@ class InfoWorker(QThread):
 class DownloadWorker(QThread):
     """Runs a yt-dlp download on a dedicated Qt thread."""
 
-    progress = Signal(float, str)  # percent, status label
+    progress = Signal(float, str)
     done = Signal()
     error = Signal(str)
 
-    def __init__(self, url: str, path: str, fmt: str, quality: str):
+    def __init__(self, url: str, path: str, platform: str, fmt: str, quality: str):
         super().__init__()
         self._url = url
         self._path = path
+        self._platform = platform
         self._fmt = fmt
         self._quality = quality
 
@@ -43,8 +44,7 @@ class DownloadWorker(QThread):
                 pct = (downloaded / total * 100) if total else 0
                 speed = d.get("_speed_str", "")
                 eta = d.get("_eta_str", "")
-                label = f"{speed}  –  ETA {eta}" if speed else ""
-                self.progress.emit(pct, label)
+                self.progress.emit(pct, f"{speed}  –  ETA {eta}" if speed else "")
             elif d["status"] == "finished":
                 self.progress.emit(100.0, "Verarbeite…")
 
@@ -52,6 +52,7 @@ class DownloadWorker(QThread):
             download_video(
                 url=self._url,
                 download_path=self._path,
+                platform=self._platform,
                 format_choice=self._fmt,
                 quality=self._quality,
                 progress_hook=hook,
