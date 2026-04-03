@@ -1,10 +1,24 @@
 import yt_dlp
 import os
+import shutil
 from pathlib import Path
 
 
 def get_default_download_path() -> str:
     return str(Path.home() / "Downloads" / "YouTube")
+
+
+def _find_ffmpeg() -> str | None:
+    """Locate ffmpeg — checks PATH first, then common Homebrew locations."""
+    if path := shutil.which("ffmpeg"):
+        return os.path.dirname(path)
+    for candidate in (
+        "/opt/homebrew/bin",   # Apple Silicon
+        "/usr/local/bin",      # Intel Mac
+    ):
+        if os.path.isfile(os.path.join(candidate, "ffmpeg")):
+            return candidate
+    return None
 
 
 def build_ydl_opts(
@@ -19,6 +33,9 @@ def build_ydl_opts(
         "outtmpl": os.path.join(download_path, "%(title)s.%(ext)s"),
         "noplaylist": True,
     }
+
+    if ffmpeg_dir := _find_ffmpeg():
+        opts["ffmpeg_location"] = ffmpeg_dir
 
     if progress_hook:
         opts["progress_hooks"] = [progress_hook]

@@ -92,6 +92,8 @@ mkdir -p "$APP/Contents/Resources"
 # Launcher-Script (findet das Repo-Verzeichnis relativ zum .app)
 cat > "$APP/Contents/MacOS/YouTube Downloader" <<'LAUNCHER'
 #!/usr/bin/env bash
+# Homebrew-PATH einbinden (Apple Silicon + Intel), damit ffmpeg gefunden wird
+export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
 # Verzeichnis der .app ermitteln -> eine Ebene höher = Repo-Root
 REPO="$(cd "$(dirname "$0")/../../.." && pwd)"
 cd "$REPO"
