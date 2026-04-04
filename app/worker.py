@@ -1,11 +1,12 @@
 from PySide6.QtCore import QThread, Signal
 
-from downloader import download_video, get_video_info, format_duration
+from downloader import (
+    download_video, get_video_info, format_duration,
+    fetch_youtube_captions, transcribe_with_whisper,
+)
 
 
 class InfoWorker(QThread):
-    """Fetches video metadata without blocking the UI."""
-
     result = Signal(str)
 
     def __init__(self, url: str):
@@ -22,19 +23,33 @@ class InfoWorker(QThread):
 
 
 class DownloadWorker(QThread):
-    """Runs a yt-dlp download on a dedicated Qt thread."""
+    progress       = Signal(float, str)   # percent, label
+    status         = Signal(str)          # status text (e.g. "Transkribiere…")
+    done           = Signal(str)          # success message
+    error          = Signal(str)
 
-    progress = Signal(float, str)
-    done = Signal()
-    error = Signal(str)
-
-    def __init__(self, url: str, path: str, platform: str, fmt: str, quality: str):
+    def __init__(
+        self,
+        url: str,
+        path: str,
+        platform: str,
+        fmt: str,
+        quality: str,
+        transcript: bool = False,
+        transcript_method: str = "youtube",   # "youtube" | "whisper"
+        transcript_model: str = "Base  (ausgewogen, ~290 MB)",
+        transcript_lang: str | None = None,
+    ):
         super().__init__()
         self._url = url
         self._path = path
         self._platform = platform
         self._fmt = fmt
         self._quality = quality
+        self._transcript = transcript
+        self._transcript_method = transcript_method
+        self._transcript_model = transcript_model
+        self._transcript_lang = transcript_lang
 
     def run(self):
         def hook(d):
@@ -57,6 +72,42 @@ class DownloadWorker(QThread):
                 quality=self._quality,
                 progress_hook=hook,
             )
-            self.done.emit()
         except Exception as e:
             self.error.emit(str(e))
+            return
+
+        if not self._transcript:
+            self.done.emit("Download abgeschlossen!")
+            return
+
+        # ── Transcript ──────────────────────────────────────────────────
+        try:
+            self.status.emit("Erstelle Transkript…")
+            transcript_path = None
+
+            if self._transcript_method == "youtube":
+                self.status.emit("Lade YouTube-Untertitel…")
+                transcript_path = fetch_youtube_captions(
+                    self._url, self._path, self._transcript_lang
+                )
+                if transcript_path is None:
+                    # Fallback to Whisper if no captions found
+                    self.status.emit("Keine Untertitel gefunden – verwende Whisper…")
+                    transcript_path = transcribe_with_whisper(
+                        self._url, self._path,
+                        model_key=self._transcript_model,
+                        lang_code=self._transcript_lang,
+                        status_hook=lambda s: self.status.emit(s),
+                    )
+            else:
+                transcript_path = transcribe_with_whisper(
+                    self._url, self._path,
+                    model_key=self._transcript_model,
+                    lang_code=self._transcript_lang,
+                    status_hook=lambda s: self.status.emit(s),
+                )
+
+            self.done.emit(f"Download + Transkript abgeschlossen!\n📄 {transcript_path}")
+        except Exception as e:
+            # Download succeeded, only transcript failed
+            self.done.emit(f"Download fertig. Transkript fehlgeschlagen: {e}")

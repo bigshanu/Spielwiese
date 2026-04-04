@@ -1,9 +1,31 @@
 import yt_dlp
 import os
+import re
 import shutil
+import tempfile
 from pathlib import Path
 
 PLATFORMS = ("youtube", "tiktok", "instagram")
+
+WHISPER_MODELS = {
+    "Tiny  (schnell, ~150 MB)":  "tiny",
+    "Base  (ausgewogen, ~290 MB)": "base",
+    "Small (genau, ~490 MB)":    "small",
+    "Medium (sehr genau, ~1.5 GB)": "medium",
+}
+
+LANGUAGES = {
+    "Auto-Erkennung": None,
+    "Deutsch":   "de",
+    "Englisch":  "en",
+    "Französisch": "fr",
+    "Spanisch":  "es",
+    "Italienisch": "it",
+    "Türkisch":  "tr",
+    "Arabisch":  "ar",
+    "Japanisch": "ja",
+    "Chinesisch": "zh",
+}
 
 
 def get_default_download_path() -> str:
@@ -11,13 +33,9 @@ def get_default_download_path() -> str:
 
 
 def _find_ffmpeg() -> str | None:
-    """Locate ffmpeg — checks PATH first, then common Homebrew locations."""
     if path := shutil.which("ffmpeg"):
         return os.path.dirname(path)
-    for candidate in (
-        "/opt/homebrew/bin",  # Apple Silicon
-        "/usr/local/bin",     # Intel Mac
-    ):
+    for candidate in ("/opt/homebrew/bin", "/usr/local/bin"):
         if os.path.isfile(os.path.join(candidate, "ffmpeg")):
             return candidate
     return None
@@ -48,22 +66,18 @@ def build_ydl_opts(
     progress_hook=None,
 ) -> dict:
     opts = _base_opts(download_path, progress_hook)
-
     if platform == "youtube":
         opts.update(_youtube_opts(format_choice, quality))
     elif platform == "tiktok":
         opts.update(_tiktok_opts(format_choice))
     elif platform == "instagram":
         opts.update(_instagram_opts(format_choice))
-
     return opts
 
 
 def _youtube_opts(format_choice: str, quality: str) -> dict:
     if format_choice == "mp3":
         return {"format": "bestaudio/best", "postprocessors": _mp3_postprocessor()}
-
-    # Prefer H.264 + AAC for QuickTime compatibility
     h264, aac = "vcodec^=avc", "acodec^=mp4a"
     quality_map = {
         "best":  (f"bestvideo[{h264}][ext=mp4]+bestaudio[{aac}][ext=m4a]"
@@ -115,6 +129,125 @@ def download_video(
     opts = build_ydl_opts(download_path, platform, format_choice, quality, progress_hook)
     with yt_dlp.YoutubeDL(opts) as ydl:
         ydl.download([url])
+
+
+# ── Transcript ────────────────────────────────────────────────────────────────
+
+def _vtt_to_text(vtt_path: str) -> str:
+    """Strip timestamps and metadata from a .vtt subtitle file → plain text."""
+    text = Path(vtt_path).read_text(encoding="utf-8", errors="ignore")
+    # Remove header, timestamps, and tags
+    lines = []
+    for line in text.splitlines():
+        if re.match(r"WEBVTT|NOTE|^\d+$|-->|^$", line.strip()):
+            continue
+        clean = re.sub(r"<[^>]+>", "", line).strip()
+        if clean:
+            lines.append(clean)
+    # Deduplicate consecutive identical lines (common in auto-captions)
+    deduped = [lines[0]] if lines else []
+    for line in lines[1:]:
+        if line != deduped[-1]:
+            deduped.append(line)
+    return " ".join(deduped)
+
+
+def fetch_youtube_captions(url: str, download_path: str, lang_code: str | None) -> str | None:
+    """
+    Try to download YouTube auto-captions via yt-dlp.
+    Returns the transcript text, or None if no captions found.
+    """
+    langs = [lang_code, "en"] if lang_code and lang_code != "en" else ["en", "de"]
+
+    with tempfile.TemporaryDirectory() as tmp:
+        opts = {
+            "skip_download": True,
+            "writeautomaticsub": True,
+            "subtitleslangs": langs,
+            "subtitlesformat": "vtt",
+            "outtmpl": os.path.join(tmp, "%(title)s.%(ext)s"),
+            "quiet": True,
+            "no_warnings": True,
+        }
+        try:
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                info = ydl.extract_info(url, download=True)
+                title = info.get("title", "transcript")
+        except Exception:
+            return None
+
+        # Find the downloaded .vtt file
+        vtt_files = list(Path(tmp).glob("*.vtt"))
+        if not vtt_files:
+            return None
+
+        text = _vtt_to_text(str(vtt_files[0]))
+        if not text:
+            return None
+
+        out_path = os.path.join(download_path, f"{title}.txt")
+        Path(out_path).write_text(text, encoding="utf-8")
+        return out_path
+
+
+def transcribe_with_whisper(
+    url: str,
+    download_path: str,
+    model_key: str = "Base  (ausgewogen, ~290 MB)",
+    lang_code: str | None = None,
+    status_hook=None,
+) -> str:
+    """
+    Download audio and transcribe locally with faster-whisper.
+    Returns the path to the saved .txt file.
+    """
+    from faster_whisper import WhisperModel
+
+    model_size = WHISPER_MODELS.get(model_key, "base")
+
+    if status_hook:
+        status_hook("Lade Audio herunter…")
+
+    with tempfile.TemporaryDirectory() as tmp:
+        # Download audio only
+        ffmpeg_dir = _find_ffmpeg()
+        opts = {
+            "format": "bestaudio/best",
+            "outtmpl": os.path.join(tmp, "audio.%(ext)s"),
+            "noplaylist": True,
+            "quiet": True,
+            "postprocessors": [{"key": "FFmpegExtractAudio", "preferredcodec": "mp3", "preferredquality": "192"}],
+        }
+        if ffmpeg_dir:
+            opts["ffmpeg_location"] = ffmpeg_dir
+
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            info = ydl.extract_info(url, download=True)
+            title = info.get("title", "transcript")
+
+        audio_path = os.path.join(tmp, "audio.mp3")
+        if not os.path.exists(audio_path):
+            # Find whatever audio file was created
+            audio_files = [f for f in Path(tmp).iterdir() if f.suffix in (".mp3", ".m4a", ".wav", ".opus")]
+            if not audio_files:
+                raise FileNotFoundError("Audio-Datei nicht gefunden.")
+            audio_path = str(audio_files[0])
+
+        if status_hook:
+            status_hook(f"Lade Whisper-Modell ({model_size})…")
+
+        model = WhisperModel(model_size, device="cpu", compute_type="int8")
+
+        if status_hook:
+            status_hook("Transkribiere…")
+
+        segments, _ = model.transcribe(audio_path, beam_size=5, language=lang_code)
+        text = " ".join(seg.text.strip() for seg in segments)
+
+    os.makedirs(download_path, exist_ok=True)
+    out_path = os.path.join(download_path, f"{title}.txt")
+    Path(out_path).write_text(text, encoding="utf-8")
+    return out_path
 
 
 def format_duration(seconds: int) -> str:
