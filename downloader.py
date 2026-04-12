@@ -105,7 +105,14 @@ def _tiktok_opts(format_choice: str) -> dict:
 def _instagram_opts(format_choice: str) -> dict:
     if format_choice == "mp3":
         return {"format": "bestaudio/best", "postprocessors": _mp3_postprocessor()}
-    return {"format": "bestvideo+bestaudio/best", "merge_output_format": "mp4"}
+    # Kein merge_output_format — Instagram liefert Videos (MP4) UND Bilder (JPG).
+    # merge_output_format würde bei Bild-Posts einen Fehler verursachen.
+    # noplaylist bleibt False damit Karussell-Posts (mehrere Bilder/Videos) vollständig
+    # heruntergeladen werden.
+    return {
+        "format": "bestvideo+bestaudio/best",
+        "noplaylist": False,
+    }
 
 
 def get_video_info(url: str) -> dict:

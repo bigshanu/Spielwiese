@@ -17,7 +17,7 @@ PLATFORMS = [
     {"id": "tiktok",    "label": "TikTok",    "has_quality": False,
      "placeholder": "https://www.tiktok.com/@user/video/..."},
     {"id": "instagram", "label": "Instagram", "has_quality": False,
-     "placeholder": "https://www.instagram.com/reel/..."},
+     "placeholder": "https://www.instagram.com/reel/... oder /p/... (Videos, Bilder, Karussells)"},
 ]
 
 STYLESHEET = """
