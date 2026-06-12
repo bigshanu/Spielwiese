@@ -46,6 +46,24 @@ def _base_opts(download_path: str, progress_hook) -> dict:
     opts = {
         "outtmpl": os.path.join(download_path, "%(title)s.%(ext)s"),
         "noplaylist": True,
+        # ── Performance-Optimierungen ──────────────────────────────────────
+        # Parallele Chunks: Video wird in 4 Teilen gleichzeitig geladen
+        "concurrent_fragments": 4,
+        # HTTP-Buffer erhöhen für stabileren Durchsatz
+        "buffersize": 1024 * 16,
+        # Automatischer Retry bei langsamen/abgebrochenen Segmenten
+        "retries": 10,
+        "fragment_retries": 10,
+        # YouTube-Throttle-Workaround: wechselt auf anderen Server wenn gedrosselt
+        "throttledratelimit": 100_000,  # unter 100 KB/s → neuen Server versuchen
+        # HTTP-Header die einen echten Browser simulieren (reduziert Throttling)
+        "http_headers": {
+            "User-Agent": (
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/120.0.0.0 Safari/537.36"
+            ),
+        },
     }
     if ffmpeg_dir := _find_ffmpeg():
         opts["ffmpeg_location"] = ffmpeg_dir
@@ -106,9 +124,7 @@ def _instagram_opts(format_choice: str) -> dict:
     if format_choice == "mp3":
         return {"format": "bestaudio/best", "postprocessors": _mp3_postprocessor()}
     # Kein merge_output_format — Instagram liefert Videos (MP4) UND Bilder (JPG).
-    # merge_output_format würde bei Bild-Posts einen Fehler verursachen.
-    # noplaylist bleibt False damit Karussell-Posts (mehrere Bilder/Videos) vollständig
-    # heruntergeladen werden.
+    # noplaylist: False damit Karussell-Posts vollständig heruntergeladen werden.
     return {
         "format": "bestvideo+bestaudio/best",
         "noplaylist": False,
@@ -141,9 +157,7 @@ def download_video(
 # ── Transcript ────────────────────────────────────────────────────────────────
 
 def _vtt_to_text(vtt_path: str) -> str:
-    """Strip timestamps and metadata from a .vtt subtitle file → plain text."""
     text = Path(vtt_path).read_text(encoding="utf-8", errors="ignore")
-    # Remove header, timestamps, and tags
     lines = []
     for line in text.splitlines():
         if re.match(r"WEBVTT|NOTE|^\d+$|-->|^$", line.strip()):
@@ -151,7 +165,6 @@ def _vtt_to_text(vtt_path: str) -> str:
         clean = re.sub(r"<[^>]+>", "", line).strip()
         if clean:
             lines.append(clean)
-    # Deduplicate consecutive identical lines (common in auto-captions)
     deduped = [lines[0]] if lines else []
     for line in lines[1:]:
         if line != deduped[-1]:
@@ -160,10 +173,6 @@ def _vtt_to_text(vtt_path: str) -> str:
 
 
 def fetch_youtube_captions(url: str, download_path: str, lang_code: str | None) -> str | None:
-    """
-    Try to download YouTube auto-captions via yt-dlp.
-    Returns the transcript text, or None if no captions found.
-    """
     langs = [lang_code, "en"] if lang_code and lang_code != "en" else ["en", "de"]
 
     with tempfile.TemporaryDirectory() as tmp:
@@ -183,7 +192,6 @@ def fetch_youtube_captions(url: str, download_path: str, lang_code: str | None) 
         except Exception:
             return None
 
-        # Find the downloaded .vtt file
         vtt_files = list(Path(tmp).glob("*.vtt"))
         if not vtt_files:
             return None
@@ -204,10 +212,6 @@ def transcribe_with_whisper(
     lang_code: str | None = None,
     status_hook=None,
 ) -> str:
-    """
-    Download audio and transcribe locally with faster-whisper.
-    Returns the path to the saved .txt file.
-    """
     from faster_whisper import WhisperModel
 
     model_size = WHISPER_MODELS.get(model_key, "base")
@@ -216,7 +220,6 @@ def transcribe_with_whisper(
         status_hook("Lade Audio herunter…")
 
     with tempfile.TemporaryDirectory() as tmp:
-        # Download audio only
         ffmpeg_dir = _find_ffmpeg()
         opts = {
             "format": "bestaudio/best",
@@ -234,7 +237,6 @@ def transcribe_with_whisper(
 
         audio_path = os.path.join(tmp, "audio.mp3")
         if not os.path.exists(audio_path):
-            # Find whatever audio file was created
             audio_files = [f for f in Path(tmp).iterdir() if f.suffix in (".mp3", ".m4a", ".wav", ".opus")]
             if not audio_files:
                 raise FileNotFoundError("Audio-Datei nicht gefunden.")
