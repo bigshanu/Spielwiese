@@ -20,6 +20,15 @@ PLATFORMS = [
      "placeholder": "https://www.instagram.com/reel/... oder /p/... (Videos, Bilder, Karussells)"},
 ]
 
+# Browser IDs understood by yt-dlp's cookiesfrombrowser option
+BROWSERS = {
+    "Keiner":  None,
+    "Safari":  "safari",
+    "Chrome":  "chrome",
+    "Firefox": "firefox",
+    "Brave":   "brave",
+}
+
 STYLESHEET = """
 QWidget {
     background-color: #1a1a2e;
@@ -112,7 +121,7 @@ class MainWindow(QWidget):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Downloader")
-        self.setFixedSize(640, 620)
+        self.setFixedSize(640, 650)
 
         self._platform_idx = 0
         self._info_worker: InfoWorker | None = None
@@ -211,6 +220,26 @@ class MainWindow(QWidget):
         browse_btn.clicked.connect(self._choose_path)
         path_row.addWidget(browse_btn)
         cl.addLayout(path_row)
+
+        # Browser cookie selector (TikTok / Instagram only)
+        self._browser_row = QWidget()
+        browser_layout = QHBoxLayout(self._browser_row)
+        browser_layout.setContentsMargins(0, 4, 0, 0)
+        browser_layout.setSpacing(8)
+        browser_lbl = self._field_label("Login via Browser")
+        browser_lbl.setFixedWidth(110)
+        browser_layout.addWidget(browser_lbl)
+        self._browser_combo = QComboBox()
+        self._browser_combo.setObjectName("combo")
+        self._browser_combo.addItems(list(BROWSERS.keys()))
+        self._browser_combo.setFixedWidth(120)
+        browser_layout.addWidget(self._browser_combo)
+        hint = QLabel("(für altersgeschützte Inhalte)")
+        hint.setObjectName("muted")
+        hint.setFont(QFont("SF Pro Display", 10))
+        browser_layout.addWidget(hint)
+        browser_layout.addStretch()
+        cl.addWidget(self._browser_row)
 
         root.addWidget(card)
         root.addSpacing(10)
@@ -327,6 +356,12 @@ class MainWindow(QWidget):
         base = str(__import__("pathlib").Path.home() / "Downloads")
         self._path_edit.setText(f"{base}/{platform['label']}")
 
+        # Browser-Cookie-Auswahl nur für TikTok / Instagram
+        is_social = platform["id"] in ("tiktok", "instagram")
+        self._browser_row.setVisible(is_social)
+        if not is_social:
+            self._browser_combo.setCurrentIndex(0)  # zurück auf "Keiner"
+
         # YouTube-Untertitel-Methode nur bei YouTube sinnvoll
         is_youtube = platform["id"] == "youtube"
         yt_item = self._method_combo.model().item(0)
@@ -340,7 +375,6 @@ class MainWindow(QWidget):
         self._transcript_opts.setVisible(checked)
 
     def _on_method_change(self, idx: int):
-        # Modell-Auswahl nur bei Whisper relevant
         self._model_combo.setEnabled(idx == 1)
 
     def _on_format_change(self, btn_id: int, checked: bool):
@@ -390,6 +424,8 @@ class MainWindow(QWidget):
         model_key = self._model_combo.currentText()
         lang_code = LANGUAGES.get(self._lang_combo.currentText())
 
+        browser = BROWSERS.get(self._browser_combo.currentText())
+
         self._dl_worker = DownloadWorker(
             url=url,
             path=self._path_edit.text(),
@@ -400,6 +436,7 @@ class MainWindow(QWidget):
             transcript_method=method,
             transcript_model=model_key,
             transcript_lang=lang_code,
+            browser=browser,
         )
         self._dl_worker.progress.connect(self._on_progress)
         self._dl_worker.status.connect(self._status_label.setText)
