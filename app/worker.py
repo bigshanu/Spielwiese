@@ -39,6 +39,7 @@ class DownloadWorker(QThread):
         transcript_method: str = "youtube",   # "youtube" | "whisper"
         transcript_model: str = "Base  (ausgewogen, ~290 MB)",
         transcript_lang: str | None = None,
+        browser: str | None = None,
     ):
         super().__init__()
         self._url = url
@@ -50,6 +51,7 @@ class DownloadWorker(QThread):
         self._transcript_method = transcript_method
         self._transcript_model = transcript_model
         self._transcript_lang = transcript_lang
+        self._browser = browser
 
     def run(self):
         def hook(d):
@@ -71,6 +73,7 @@ class DownloadWorker(QThread):
                 format_choice=self._fmt,
                 quality=self._quality,
                 progress_hook=hook,
+                browser=self._browser,
             )
         except Exception as e:
             self.error.emit(str(e))
@@ -91,7 +94,6 @@ class DownloadWorker(QThread):
                     self._url, self._path, self._transcript_lang
                 )
                 if transcript_path is None:
-                    # Fallback to Whisper if no captions found
                     self.status.emit("Keine Untertitel gefunden – verwende Whisper…")
                     transcript_path = transcribe_with_whisper(
                         self._url, self._path,
@@ -109,5 +111,4 @@ class DownloadWorker(QThread):
 
             self.done.emit(f"Download + Transkript abgeschlossen!\n📄 {transcript_path}")
         except Exception as e:
-            # Download succeeded, only transcript failed
             self.done.emit(f"Download fertig. Transkript fehlgeschlagen: {e}")
