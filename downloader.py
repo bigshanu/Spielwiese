@@ -46,17 +46,11 @@ def _base_opts(download_path: str, progress_hook) -> dict:
     opts = {
         "outtmpl": os.path.join(download_path, "%(title)s.%(ext)s"),
         "noplaylist": True,
-        # ── Performance-Optimierungen ──────────────────────────────────────
-        # Parallele Chunks: Video wird in 4 Teilen gleichzeitig geladen
         "concurrent_fragments": 4,
-        # HTTP-Buffer erhöhen für stabileren Durchsatz
         "buffersize": 1024 * 16,
-        # Automatischer Retry bei langsamen/abgebrochenen Segmenten
         "retries": 10,
         "fragment_retries": 10,
-        # YouTube-Throttle-Workaround: wechselt auf anderen Server wenn gedrosselt
-        "throttledratelimit": 100_000,  # unter 100 KB/s → neuen Server versuchen
-        # HTTP-Header die einen echten Browser simulieren (reduziert Throttling)
+        "throttledratelimit": 100_000,
         "http_headers": {
             "User-Agent": (
                 "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
@@ -82,8 +76,11 @@ def build_ydl_opts(
     format_choice: str = "mp4",
     quality: str = "best",
     progress_hook=None,
+    browser: str | None = None,
 ) -> dict:
     opts = _base_opts(download_path, progress_hook)
+    if browser:
+        opts["cookiesfrombrowser"] = (browser,)
     if platform == "youtube":
         opts.update(_youtube_opts(format_choice, quality))
     elif platform == "tiktok":
@@ -148,8 +145,9 @@ def download_video(
     format_choice: str = "mp4",
     quality: str = "best",
     progress_hook=None,
+    browser: str | None = None,
 ) -> None:
-    opts = build_ydl_opts(download_path, platform, format_choice, quality, progress_hook)
+    opts = build_ydl_opts(download_path, platform, format_choice, quality, progress_hook, browser)
     with yt_dlp.YoutubeDL(opts) as ydl:
         ydl.download([url])
 
@@ -157,6 +155,7 @@ def download_video(
 # ── Transcript ────────────────────────────────────────────────────────────────
 
 def _vtt_to_text(vtt_path: str) -> str:
+    """Strip timestamps and metadata from a .vtt subtitle file → plain text."""
     text = Path(vtt_path).read_text(encoding="utf-8", errors="ignore")
     lines = []
     for line in text.splitlines():
@@ -173,6 +172,10 @@ def _vtt_to_text(vtt_path: str) -> str:
 
 
 def fetch_youtube_captions(url: str, download_path: str, lang_code: str | None) -> str | None:
+    """
+    Try to download YouTube auto-captions via yt-dlp.
+    Returns the transcript text, or None if no captions found.
+    """
     langs = [lang_code, "en"] if lang_code and lang_code != "en" else ["en", "de"]
 
     with tempfile.TemporaryDirectory() as tmp:
@@ -212,6 +215,10 @@ def transcribe_with_whisper(
     lang_code: str | None = None,
     status_hook=None,
 ) -> str:
+    """
+    Download audio and transcribe locally with faster-whisper.
+    Returns the path to the saved .txt file.
+    """
     from faster_whisper import WhisperModel
 
     model_size = WHISPER_MODELS.get(model_key, "base")
