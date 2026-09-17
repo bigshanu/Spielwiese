@@ -1,9 +1,14 @@
 import yt_dlp
+import json
 import os
 import re
 import shutil
+import subprocess
+import sys
 import tempfile
+import urllib.request
 from pathlib import Path
+from urllib.error import URLError
 
 PLATFORMS = ("youtube", "tiktok", "instagram")
 
@@ -77,6 +82,7 @@ def build_ydl_opts(
     quality: str = "best",
     progress_hook=None,
     browser: str | None = None,
+    playlist: bool = False,
 ) -> dict:
     opts = _base_opts(download_path, progress_hook)
     if browser:
@@ -87,6 +93,8 @@ def build_ydl_opts(
         opts.update(_tiktok_opts(format_choice))
     elif platform == "instagram":
         opts.update(_instagram_opts(format_choice))
+    if playlist:
+        opts["noplaylist"] = False
     return opts
 
 
@@ -146,10 +154,47 @@ def download_video(
     quality: str = "best",
     progress_hook=None,
     browser: str | None = None,
+    playlist: bool = False,
 ) -> None:
-    opts = build_ydl_opts(download_path, platform, format_choice, quality, progress_hook, browser)
+    opts = build_ydl_opts(download_path, platform, format_choice, quality, progress_hook, browser, playlist)
     with yt_dlp.YoutubeDL(opts) as ydl:
         ydl.download([url])
+
+
+# ── yt-dlp self-update ──────────────────────────────────────────────────────
+
+def _version_tuple(v: str) -> tuple[int, ...]:
+    parts = []
+    for p in v.split("."):
+        digits = "".join(ch for ch in p if ch.isdigit())
+        parts.append(int(digits) if digits else 0)
+    return tuple(parts)
+
+
+def check_yt_dlp_update(timeout: float = 4.0) -> tuple[str, str | None]:
+    """
+    Compare the installed yt-dlp version against the latest on PyPI.
+    Returns (current_version, latest_version) if an update is available,
+    or (current_version, None) if up to date or the check failed (e.g. offline).
+    """
+    current = yt_dlp.version.__version__
+    try:
+        with urllib.request.urlopen("https://pypi.org/pypi/yt-dlp/json", timeout=timeout) as resp:
+            data = json.load(resp)
+        latest = data["info"]["version"]
+    except (URLError, KeyError, ValueError, OSError):
+        return current, None
+    if _version_tuple(latest) <= _version_tuple(current):
+        return current, None
+    return current, latest
+
+
+def update_yt_dlp() -> None:
+    """Upgrade yt-dlp in the current Python environment via pip."""
+    subprocess.run(
+        [sys.executable, "-m", "pip", "install", "--upgrade", "--quiet", "yt-dlp"],
+        check=True,
+    )
 
 
 # ── Transcript ────────────────────────────────────────────────────────────────

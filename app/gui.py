@@ -4,12 +4,13 @@ from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit,
     QPushButton, QComboBox, QProgressBar, QFileDialog,
     QMessageBox, QButtonGroup, QRadioButton, QFrame, QCheckBox,
+    QListWidget, QListWidgetItem,
 )
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QFont
 
 from downloader import get_default_download_path, WHISPER_MODELS, LANGUAGES
-from app.worker import InfoWorker, DownloadWorker
+from app.worker import InfoWorker, DownloadWorker, UpdateCheckWorker, UpdateWorker
 
 PLATFORMS = [
     {"id": "youtube",   "label": "YouTube",   "has_quality": True,
@@ -114,6 +115,16 @@ QPushButton#secondary:hover { background-color: #1a4a80; }
 
 QProgressBar { background-color: #0f3460; border-radius: 4px; border: none; }
 QProgressBar::chunk { background-color: #e94560; border-radius: 4px; }
+
+QListWidget {
+    background-color: #0f3460;
+    border: none;
+    border-radius: 6px;
+    color: #eaeaea;
+    font-size: 11px;
+}
+QListWidget::item { padding: 4px 6px; }
+QListWidget::item:selected { background-color: #e94560; }
 """
 
 
@@ -121,15 +132,23 @@ class MainWindow(QWidget):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Downloader")
-        self.setFixedSize(640, 650)
+        self.setMinimumSize(640, 700)
+        self.resize(640, 900)
 
         self._platform_idx = 0
         self._info_worker: InfoWorker | None = None
         self._dl_worker: DownloadWorker | None = None
+        self._update_worker: UpdateCheckWorker | None = None
+        self._upd_worker: UpdateWorker | None = None
+
+        self._queue: list[dict] = []
+        self._queue_active = False
+        self._queue_pos = 0
 
         self._build_ui()
         self.setStyleSheet(STYLESHEET)
         self._switch_platform(0)
+        self._check_for_update()
 
     # ------------------------------------------------------------------- UI --
 
@@ -149,7 +168,24 @@ class MainWindow(QWidget):
         subtitle.setObjectName("muted")
         subtitle.setAlignment(Qt.AlignmentFlag.AlignCenter)
         root.addWidget(subtitle)
-        root.addSpacing(18)
+        root.addSpacing(10)
+
+        # Update-Banner (yt-dlp veraltet) — standardmäßig versteckt
+        self._update_banner = QWidget()
+        ub_layout = QHBoxLayout(self._update_banner)
+        ub_layout.setContentsMargins(0, 0, 0, 0)
+        self._update_label = QLabel("")
+        self._update_label.setObjectName("muted")
+        self._update_label.setWordWrap(True)
+        ub_layout.addWidget(self._update_label)
+        ub_layout.addStretch()
+        self._update_btn = QPushButton("Aktualisieren")
+        self._update_btn.setObjectName("secondary")
+        self._update_btn.clicked.connect(self._run_update)
+        ub_layout.addWidget(self._update_btn)
+        root.addWidget(self._update_banner)
+        self._update_banner.setVisible(False)
+        root.addSpacing(8)
 
         # Platform tabs
         tab_row = QHBoxLayout()
@@ -241,6 +277,12 @@ class MainWindow(QWidget):
         browser_layout.addStretch()
         cl.addWidget(self._browser_row)
 
+        self._playlist_cb = QCheckBox("Playlist (alle Videos der Playlist/des Kanals)")
+        self._playlist_cb.setToolTip(
+            "Lädt die gesamte Playlist/Kanal-Seite statt nur des einzelnen Videos."
+        )
+        cl.addWidget(self._playlist_cb)
+
         root.addWidget(card)
         root.addSpacing(10)
 
@@ -296,6 +338,39 @@ class MainWindow(QWidget):
         tl.addWidget(self._transcript_opts)
         self._transcript_opts.setVisible(False)
         root.addWidget(tc)
+        root.addSpacing(12)
+
+        # ── Warteschlange ──────────────────────────────────────────────────
+        qc = QFrame()
+        qc.setObjectName("transcript-card")
+        ql = QVBoxLayout(qc)
+        ql.setContentsMargins(16, 12, 16, 14)
+        ql.setSpacing(8)
+
+        q_header = QHBoxLayout()
+        q_title = QLabel("Warteschlange")
+        q_title.setFont(QFont("SF Pro Display", 11, QFont.Weight.Bold))
+        q_header.addWidget(q_title)
+        q_header.addStretch()
+        add_btn = QPushButton("+ Hinzufügen")
+        add_btn.setObjectName("secondary")
+        add_btn.clicked.connect(self._add_to_queue)
+        q_header.addWidget(add_btn)
+        remove_btn = QPushButton("− Entfernen")
+        remove_btn.setObjectName("secondary")
+        remove_btn.clicked.connect(self._remove_selected_queue_item)
+        q_header.addWidget(remove_btn)
+        clear_btn = QPushButton("Leeren")
+        clear_btn.setObjectName("secondary")
+        clear_btn.clicked.connect(self._clear_queue)
+        q_header.addWidget(clear_btn)
+        ql.addLayout(q_header)
+
+        self._queue_list = QListWidget()
+        self._queue_list.setFixedHeight(100)
+        ql.addWidget(self._queue_list)
+
+        root.addWidget(qc)
         root.addSpacing(12)
 
         # Progress
@@ -405,61 +480,131 @@ class MainWindow(QWidget):
         self._info_worker.result.connect(self._info_label.setText)
         self._info_worker.start()
 
-    # ─────────────────────────────────────────────────────── download ──
+    # ─────────────────────────────────────────────────────── Warteschlange ──
 
-    def _start_download(self):
-        if self._dl_worker and self._dl_worker.isRunning():
-            return
-        url = self._url_edit.text().strip()
-        if not url:
-            QMessageBox.warning(self, "Fehlende URL", "Bitte eine URL eingeben.")
-            return
-
+    def _snapshot_item(self, url: str) -> dict:
         platform = PLATFORMS[self._platform_idx]
         fmt = "mp3" if self._fmt_group.checkedId() == 1 else "mp4"
         quality = self._quality_combo.currentText() if platform["has_quality"] else "best"
-
-        transcript = self._transcript_cb.isChecked()
-        method = "whisper" if self._method_combo.currentIndex() == 1 else "youtube"
-        model_key = self._model_combo.currentText()
-        lang_code = LANGUAGES.get(self._lang_combo.currentText())
-
-        browser = BROWSERS.get(self._browser_combo.currentText())
-
-        self._dl_worker = DownloadWorker(
+        return dict(
             url=url,
             path=self._path_edit.text(),
             platform=platform["id"],
             fmt=fmt,
             quality=quality,
-            transcript=transcript,
-            transcript_method=method,
-            transcript_model=model_key,
-            transcript_lang=lang_code,
-            browser=browser,
+            playlist=self._playlist_cb.isChecked(),
+            transcript=self._transcript_cb.isChecked(),
+            transcript_method="whisper" if self._method_combo.currentIndex() == 1 else "youtube",
+            transcript_model=self._model_combo.currentText(),
+            transcript_lang=LANGUAGES.get(self._lang_combo.currentText()),
+            browser=BROWSERS.get(self._browser_combo.currentText()),
         )
-        self._dl_worker.progress.connect(self._on_progress)
-        self._dl_worker.status.connect(self._status_label.setText)
-        self._dl_worker.done.connect(self._on_done)
-        self._dl_worker.error.connect(self._on_error)
 
+    def _add_to_queue(self):
+        url = self._url_edit.text().strip()
+        if not url:
+            QMessageBox.warning(self, "Fehlende URL", "Bitte eine URL eingeben.")
+            return
+        item = self._snapshot_item(url)
+        self._queue.append(item)
+        label = PLATFORMS[self._platform_idx]["label"]
+        self._queue_list.addItem(QListWidgetItem(f"⏳ [{label}] {url}"))
+        self._url_edit.clear()
+        self._info_label.clear()
+
+    def _remove_selected_queue_item(self):
+        if self._queue_active:
+            return
+        row = self._queue_list.currentRow()
+        if row < 0:
+            return
+        self._queue_list.takeItem(row)
+        del self._queue[row]
+
+    def _clear_queue(self):
+        if self._queue_active:
+            return
+        self._queue_list.clear()
+        self._queue.clear()
+
+    # ─────────────────────────────────────────────────────── download ──
+
+    def _start_download(self):
+        if self._queue_active:
+            return
+        if not self._queue:
+            url = self._url_edit.text().strip()
+            if not url:
+                QMessageBox.warning(self, "Fehlende URL", "Bitte eine URL eingeben.")
+                return
+            self._add_to_queue()
+
+        self._queue_active = True
+        self._queue_pos = 0
         self._dl_btn.setEnabled(False)
         self._dl_btn.setText("Lädt herunter…")
         self._progress.setValue(0)
+        self._process_next_queue_item()
+
+    def _process_next_queue_item(self):
+        if self._queue_pos >= len(self._queue):
+            self._queue_active = False
+            self._dl_btn.setEnabled(True)
+            self._dl_btn.setText("Download starten")
+            self._status_label.setText("Warteschlange abgeschlossen!")
+            return
+
+        item = self._queue[self._queue_pos]
+        self._queue_list.item(self._queue_pos).setText(f"⬇️ [{item['platform']}] {item['url']}")
+
+        self._dl_worker = DownloadWorker(**item)
+        self._dl_worker.progress.connect(self._on_progress)
+        self._dl_worker.status.connect(self._status_label.setText)
+        self._dl_worker.done.connect(self._on_item_done)
+        self._dl_worker.error.connect(self._on_item_error)
         self._dl_worker.start()
 
     def _on_progress(self, pct: float, label: str):
         self._progress.setValue(int(pct))
         self._status_label.setText(label)
 
-    def _on_done(self, msg: str):
-        self._status_label.setText("Fertig!")
-        self._dl_btn.setEnabled(True)
-        self._dl_btn.setText("Download starten")
-        QMessageBox.information(self, "Fertig", msg)
+    def _on_item_done(self, msg: str):
+        item = self._queue[self._queue_pos]
+        self._queue_list.item(self._queue_pos).setText(f"✅ [{item['platform']}] {item['url']}")
+        self._queue_pos += 1
+        self._process_next_queue_item()
 
-    def _on_error(self, msg: str):
-        self._status_label.setText("")
-        self._dl_btn.setEnabled(True)
-        self._dl_btn.setText("Download starten")
-        QMessageBox.critical(self, "Fehler", msg)
+    def _on_item_error(self, msg: str):
+        item = self._queue[self._queue_pos]
+        self._queue_list.item(self._queue_pos).setText(f"❌ [{item['platform']}] {item['url']}  –  {msg}")
+        self._queue_pos += 1
+        self._process_next_queue_item()
+
+    # ─────────────────────────────────────────────────────── yt-dlp update ──
+
+    def _check_for_update(self):
+        self._update_worker = UpdateCheckWorker()
+        self._update_worker.result.connect(self._on_update_check_result)
+        self._update_worker.start()
+
+    def _on_update_check_result(self, current: str, latest: str | None):
+        if latest:
+            self._update_label.setText(f"⚠ yt-dlp Update verfügbar: {current} → {latest}")
+            self._update_banner.setVisible(True)
+
+    def _run_update(self):
+        self._update_btn.setEnabled(False)
+        self._update_btn.setText("Aktualisiere…")
+        self._upd_worker = UpdateWorker()
+        self._upd_worker.done.connect(self._on_update_done)
+        self._upd_worker.error.connect(self._on_update_error)
+        self._upd_worker.start()
+
+    def _on_update_done(self):
+        self._update_banner.setVisible(False)
+        QMessageBox.information(self, "Update", "yt-dlp wurde aktualisiert.\nBitte die App neu starten.")
+
+    def _on_update_error(self, msg: str):
+        self._update_btn.setEnabled(True)
+        self._update_btn.setText("Aktualisieren")
+        QMessageBox.critical(self, "Update fehlgeschlagen", msg)

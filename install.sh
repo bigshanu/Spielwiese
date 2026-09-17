@@ -51,6 +51,12 @@ echo "→ Installiere Pakete (PySide6 + yt-dlp + Pillow) …"
 .venv/bin/pip install --upgrade pip --quiet
 .venv/bin/pip install -r requirements.txt --quiet
 
+# yt-dlp immer auf die neueste Version bringen, auch wenn requirements.txt
+# schon erfüllt ist — YouTube ändert sein Player-Backend häufig, veraltete
+# yt-dlp-Versionen enden dann in "HTTP Error 403: Forbidden".
+echo "→ Aktualisiere yt-dlp auf die neueste Version …"
+.venv/bin/pip install --upgrade yt-dlp --quiet
+
 # ── 7. Smoke-Test ────────────────────────────────────
 echo "→ Prüfe PySide6 …"
 if ! .venv/bin/python -c "from PySide6.QtWidgets import QApplication" 2>/dev/null; then
